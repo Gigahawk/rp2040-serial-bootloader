@@ -21,12 +21,12 @@
     __stack (== StackTop)
 */
 
-/* Skip 16kB at the start of flash, that's where our bootloader is */
+/* Skip 32kB at the start of flash, that's where our bootloader is */
 MEMORY
 {
-    FLASH_BL(rx) : ORIGIN = 0x10000000, LENGTH = 12k
-    FLASH_IMGHDR(rx) : ORIGIN = 0x10000000 + 12k, LENGTH = 4k
-    FLASH_APP(rx) : ORIGIN = 0x10000000 + 16k, LENGTH = 2048k - 16k
+    FLASH_BL(rx) : ORIGIN = 0x10000000, LENGTH = 28k
+    FLASH_IMGHDR(rx) : ORIGIN = 0x10000000 + 28k, LENGTH = 4k
+    FLASH_APP(rx) : ORIGIN = 0x10000000 + 32k, LENGTH = 2048k - 32k
     RAM(rwx) : ORIGIN =  0x20000000, LENGTH = 256k
     SCRATCH_X(rwx) : ORIGIN = 0x20040000, LENGTH = 4k
     SCRATCH_Y(rwx) : ORIGIN = 0x20041000, LENGTH = 4k

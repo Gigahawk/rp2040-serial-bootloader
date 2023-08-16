@@ -8,6 +8,7 @@
 
 #include "RP2040.h"
 #include "pico/time.h"
+#include "pico/stdio_usb.h"
 #include "hardware/dma.h"
 #include "hardware/flash.h"
 #include "hardware/structs/dma.h"
@@ -18,12 +19,8 @@
 #include "hardware/watchdog.h"
 
 #ifdef DEBUG
-#include <stdio.h>
-#include "pico/stdio_usb.h"
-#define DBG_PRINTF_INIT() stdio_usb_init()
 #define DBG_PRINTF(...) printf(__VA_ARGS__)
 #else
-#define DBG_PRINTF_INIT() { }
 #define DBG_PRINTF(...) { }
 #endif
 
@@ -34,9 +31,26 @@
 #define BOOTLOADER_ENTRY_PIN 15
 #define BOOTLOADER_ENTRY_MAGIC 0xb105f00d
 
-#define UART_TX_PIN 0
-#define UART_RX_PIN 1
-#define UART_BAUD   921600
+#ifndef PRIMARY_UART
+#define PRIMARY_UART uart0
+#endif
+
+#ifndef SECONDARY_UART
+#define SECONDARY_UART uart1
+#endif
+
+#ifndef PICO_SECONDARY_UART_TX_PIN
+#define PICO_SECONDARY_UART_TX_PIN 4
+#endif
+
+#ifndef PICO_SECONDARY_UART_RX_PIN
+#define PICO_SECONDARY_UART_RX_PIN 5
+#endif
+
+#define STRINGIFY_(x) #x
+#define STRINGIFY(x) STRINGIFY_(x)
+
+#define UART_BAUD   115200
 
 #define CMD_SYNC   (('S' << 0) | ('Y' << 8) | ('N' << 16) | ('C' << 24))
 #define CMD_READ   (('R' << 0) | ('E' << 8) | ('A' << 16) | ('D' << 24))
@@ -544,6 +558,13 @@ static const struct command_desc *find_command_desc(uint32_t opcode)
 	return NULL;
 }
 
+enum input {
+	INPUT_NONE,
+	INPUT_UART0,
+	INPUT_UART1,
+	INPUT_USB,
+};
+
 struct cmd_context {
 	uint8_t *uart_buf;
 	const struct command_desc *desc;
@@ -555,6 +576,7 @@ struct cmd_context {
 	uint8_t *resp_data;
 	uint32_t data_len;
 	uint32_t resp_data_len;
+	enum input input;
 };
 
 enum state {
@@ -565,6 +587,71 @@ enum state {
 	STATE_HANDLE_DATA,
 	STATE_ERROR,
 };
+
+int read_and_echo_char(struct cmd_context *ctx)
+{
+	int c;
+	if (ctx->input == INPUT_NONE || ctx->input == INPUT_UART0) {
+		if(uart_is_readable(uart0)) {
+			if(ctx->input == INPUT_NONE)
+				DBG_PRINTF("Using UART0 for communication\n");
+			ctx->input = INPUT_UART0;
+			c = uart_getc(uart0);
+			uart_putc(uart0, c);
+			DBG_PRINTF("%d\n", c);
+			return c;
+		}
+	}
+	if (ctx->input == INPUT_NONE || ctx->input == INPUT_UART1) {
+		if(uart_is_readable(uart1)) {
+			if(ctx->input == INPUT_NONE)
+				DBG_PRINTF("Using UART1 for communication\n");
+			ctx->input = INPUT_UART1;
+			c = uart_getc(uart1);
+			uart_putc(uart1, c);
+			DBG_PRINTF("%d\n", c);
+			return c;
+		}
+	}
+	if (ctx->input == INPUT_NONE || ctx->input == INPUT_USB) {
+		c = getchar_timeout_us(1000);
+		if (c != PICO_ERROR_TIMEOUT) {
+			if(ctx->input == INPUT_NONE)
+				DBG_PRINTF("Using USB for communication\n");
+			ctx->input = INPUT_USB;
+			putchar_raw((char)c);
+			return c;
+		}
+	}
+	return PICO_ERROR_NO_DATA;
+}
+
+void serial_read_blocking(struct cmd_context *ctx, uint8_t *dst, size_t len) {
+	int c;
+	for (size_t i=0; i < len; i++) {
+		while(1) {
+			c = read_and_echo_char(ctx);
+			if (c != PICO_ERROR_NO_DATA)
+				break;
+		}
+		dst[i] = (uint8_t)c;
+	}
+}
+
+void serial_write_blocking(struct cmd_context *ctx, const uint8_t *src, size_t len) {
+	for (size_t i=0; i < len; i++) {
+		switch(ctx->input) {
+		case INPUT_UART0:
+			uart_putc(uart0, src[i]);
+			break;
+		case INPUT_UART1:
+			uart_putc(uart1, src[i]);
+			break;
+		default:
+			putchar_raw(src[i]);
+		}
+	}
+}
 
 static enum state state_wait_for_sync(struct cmd_context *ctx)
 {
@@ -577,7 +664,7 @@ static enum state state_wait_for_sync(struct cmd_context *ctx)
 	gpio_put(PICO_DEFAULT_LED_PIN, 1);
 
 	while (idx < sizeof(ctx->opcode)) {
-		uart_read_blocking(uart0, &recv[idx], 1);
+		serial_read_blocking(ctx, &recv[idx], 1);
 		gpio_xor_mask((1 << PICO_DEFAULT_LED_PIN));
 
 		if (recv[idx] != match[idx]) {
@@ -596,7 +683,7 @@ static enum state state_wait_for_sync(struct cmd_context *ctx)
 
 static enum state state_read_opcode(struct cmd_context *ctx)
 {
-	uart_read_blocking(uart0, (uint8_t *)&ctx->opcode, sizeof(ctx->opcode));
+	serial_read_blocking(ctx, (uint8_t *)&ctx->opcode, sizeof(ctx->opcode));
 
 	return STATE_READ_ARGS;
 }
@@ -616,7 +703,7 @@ static enum state state_read_args(struct cmd_context *ctx)
 	ctx->resp_args = ctx->args;
 	ctx->resp_data = (uint8_t *)(ctx->resp_args + desc->resp_nargs);
 
-	uart_read_blocking(uart0, (uint8_t *)ctx->args, sizeof(*ctx->args) * desc->nargs);
+	serial_read_blocking(ctx, (uint8_t *)ctx->args, sizeof(*ctx->args) * desc->nargs);
 
 	return STATE_READ_DATA;
 }
@@ -637,7 +724,7 @@ static enum state state_read_data(struct cmd_context *ctx)
 
 	// TODO: Check sizes
 
-	uart_read_blocking(uart0, (uint8_t *)ctx->data, ctx->data_len);
+	serial_read_blocking(ctx, (uint8_t *)ctx->data, ctx->data_len);
 
 	return STATE_HANDLE_DATA;
 }
@@ -658,7 +745,7 @@ static enum state state_handle_data(struct cmd_context *ctx)
 
 	size_t resp_len = sizeof(ctx->status) + (sizeof(*ctx->resp_args) * desc->resp_nargs) + ctx->resp_data_len;
 	memcpy(ctx->uart_buf, &ctx->status, sizeof(ctx->status));
-	uart_write_blocking(uart0, ctx->uart_buf, resp_len);
+	serial_write_blocking(ctx, ctx->uart_buf, resp_len);
 
 	return STATE_READ_OPCODE;
 }
@@ -667,7 +754,7 @@ static enum state state_error(struct cmd_context *ctx)
 {
 	size_t resp_len = sizeof(ctx->status);
 	memcpy(ctx->uart_buf, &ctx->status, sizeof(ctx->status));
-	uart_write_blocking(uart0, ctx->uart_buf, resp_len);
+	serial_write_blocking(ctx, ctx->uart_buf, resp_len);
 
 	return STATE_WAIT_FOR_SYNC;
 }
@@ -682,6 +769,11 @@ static bool should_stay_in_bootloader()
 
 int main(void)
 {
+	stdio_usb_init();
+	// Sleep required for USB to connect in time to see debug messages
+	sleep_ms(1000);
+	DBG_PRINTF("usb_init\n");
+
 	gpio_init(PICO_DEFAULT_LED_PIN);
 	gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
 	gpio_put(PICO_DEFAULT_LED_PIN, 1);
@@ -701,14 +793,22 @@ int main(void)
 		jump_to_vtor(vtor);
 	}
 
-	DBG_PRINTF_INIT();
+	uart_init(PRIMARY_UART, UART_BAUD);
+	gpio_set_function(PICO_DEFAULT_UART_TX_PIN, GPIO_FUNC_UART);
+	gpio_set_function(PICO_DEFAULT_UART_RX_PIN, GPIO_FUNC_UART);
+	uart_set_hw_flow(PRIMARY_UART, false, false);
 
-	uart_init(uart0, UART_BAUD);
-	gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
-	gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
-	uart_set_hw_flow(uart0, false, false);
+	uart_init(SECONDARY_UART, UART_BAUD);
+	gpio_set_function(PICO_SECONDARY_UART_TX_PIN, GPIO_FUNC_UART);
+	gpio_set_function(PICO_SECONDARY_UART_RX_PIN, GPIO_FUNC_UART);
+	uart_set_hw_flow(SECONDARY_UART, false, false);
+
+	// UARTs seem to start with a single null byte in buffer? Clear them out
+	uart_getc(uart0);
+	uart_getc(uart1);
 
 	struct cmd_context ctx;
+	ctx.input = INPUT_NONE;
 	uint8_t uart_buf[(sizeof(uint32_t) * (1 + MAX_NARG)) + MAX_DATA_LEN];
 	ctx.uart_buf = uart_buf;
 	enum state state = STATE_WAIT_FOR_SYNC;

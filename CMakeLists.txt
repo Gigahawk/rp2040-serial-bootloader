@@ -56,6 +56,7 @@ pico_set_linker_script(bootloader ${CMAKE_CURRENT_SOURCE_DIR}/bootloader.ld)
 
 target_link_libraries(bootloader
                       pico_stdlib
+                      pico_stdio_usb
                       hardware_dma
                       hardware_flash
                       hardware_structs
