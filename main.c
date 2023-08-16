@@ -626,16 +626,22 @@ int read_and_echo_char(struct cmd_context *ctx)
 	return PICO_ERROR_NO_DATA;
 }
 
-void serial_read_blocking(struct cmd_context *ctx, uint8_t *dst, size_t len) {
+int serial_read_blocking(struct cmd_context *ctx, uint8_t *dst, size_t len) {
 	int c;
+	uint64_t start = time_us_64();
 	for (size_t i=0; i < len; i++) {
 		while(1) {
 			c = read_and_echo_char(ctx);
+			if (time_us_64() - start > 30000000) {
+				ctx->status = RSP_ERR;
+				return PICO_ERROR_TIMEOUT;
+			}
 			if (c != PICO_ERROR_NO_DATA)
 				break;
 		}
 		dst[i] = (uint8_t)c;
 	}
+	return 0;
 }
 
 void serial_write_blocking(struct cmd_context *ctx, const uint8_t *src, size_t len) {
@@ -647,7 +653,12 @@ void serial_write_blocking(struct cmd_context *ctx, const uint8_t *src, size_t l
 		case INPUT_UART1:
 			uart_putc(uart1, src[i]);
 			break;
+		case INPUT_USB:
+			putchar_raw(src[i]);
+			break;
 		default:
+			uart_putc(uart0, src[i]);
+			uart_putc(uart1, src[i]);
 			putchar_raw(src[i]);
 		}
 	}
@@ -664,7 +675,9 @@ static enum state state_wait_for_sync(struct cmd_context *ctx)
 	gpio_put(PICO_DEFAULT_LED_PIN, 1);
 
 	while (idx < sizeof(ctx->opcode)) {
-		serial_read_blocking(ctx, &recv[idx], 1);
+		if (serial_read_blocking(ctx, &recv[idx], 1) == PICO_ERROR_TIMEOUT) {
+			return STATE_ERROR;
+		}
 		gpio_xor_mask((1 << PICO_DEFAULT_LED_PIN));
 
 		if (recv[idx] != match[idx]) {
@@ -683,7 +696,9 @@ static enum state state_wait_for_sync(struct cmd_context *ctx)
 
 static enum state state_read_opcode(struct cmd_context *ctx)
 {
-	serial_read_blocking(ctx, (uint8_t *)&ctx->opcode, sizeof(ctx->opcode));
+	if (serial_read_blocking(ctx, (uint8_t *)&ctx->opcode, sizeof(ctx->opcode)) == PICO_ERROR_TIMEOUT) {
+		return STATE_ERROR;
+	}
 
 	return STATE_READ_ARGS;
 }
@@ -703,7 +718,9 @@ static enum state state_read_args(struct cmd_context *ctx)
 	ctx->resp_args = ctx->args;
 	ctx->resp_data = (uint8_t *)(ctx->resp_args + desc->resp_nargs);
 
-	serial_read_blocking(ctx, (uint8_t *)ctx->args, sizeof(*ctx->args) * desc->nargs);
+	if (serial_read_blocking(ctx, (uint8_t *)ctx->args, sizeof(*ctx->args) * desc->nargs) == PICO_ERROR_TIMEOUT) {
+		return STATE_ERROR;
+	}
 
 	return STATE_READ_DATA;
 }
@@ -724,7 +741,9 @@ static enum state state_read_data(struct cmd_context *ctx)
 
 	// TODO: Check sizes
 
-	serial_read_blocking(ctx, (uint8_t *)ctx->data, ctx->data_len);
+	if(serial_read_blocking(ctx, (uint8_t *)ctx->data, ctx->data_len) == PICO_ERROR_TIMEOUT) {
+		return STATE_ERROR;
+	}
 
 	return STATE_HANDLE_DATA;
 }
@@ -752,6 +771,7 @@ static enum state state_handle_data(struct cmd_context *ctx)
 
 static enum state state_error(struct cmd_context *ctx)
 {
+	ctx->input = INPUT_NONE;
 	size_t resp_len = sizeof(ctx->status);
 	memcpy(ctx->uart_buf, &ctx->status, sizeof(ctx->status));
 	serial_write_blocking(ctx, ctx->uart_buf, resp_len);
