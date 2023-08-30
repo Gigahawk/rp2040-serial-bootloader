@@ -205,10 +205,10 @@ const struct command_desc cmds[] = {
 	},
 	{
 		// INFO
-		// OKOK flash_start flash_size erase_size write_size max_data_len
+		// OKOK flash_start flash_size erase_start erase_size write_size max_data_len
 		.opcode = CMD_INFO,
 		.nargs = 0,
-		.resp_nargs = 5,
+		.resp_nargs = 6,
 		.size = NULL,
 		.handle = &handle_info,
 	},
@@ -507,9 +507,10 @@ static uint32_t handle_info(uint32_t *args_in, uint8_t *data_in, uint32_t *resp_
 {
 	resp_args_out[0] = WRITE_ADDR_MIN;
 	resp_args_out[1] = (XIP_BASE + PICO_FLASH_SIZE_BYTES) - WRITE_ADDR_MIN;
-	resp_args_out[2] = FLASH_SECTOR_SIZE;
-	resp_args_out[3] = FLASH_PAGE_SIZE;
-	resp_args_out[4] = MAX_DATA_LEN;
+	resp_args_out[2] = ERASE_ADDR_MIN;
+	resp_args_out[3] = FLASH_SECTOR_SIZE;
+	resp_args_out[4] = FLASH_PAGE_SIZE;
+	resp_args_out[5] = MAX_DATA_LEN;
 
 	return RSP_OK;
 }
