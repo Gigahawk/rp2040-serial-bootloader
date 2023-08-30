@@ -374,7 +374,7 @@ static uint32_t handle_erase(uint32_t *args_in, uint8_t *data_in, uint32_t *resp
 	uint32_t addr = args_in[0];
 	uint32_t size = args_in[1];
 
-	if ((addr < ERASE_ADDR_MIN) || (addr + size >= FLASH_ADDR_MAX)) {
+	if ((addr < ERASE_ADDR_MIN) || (addr + size > FLASH_ADDR_MAX)) {
 		// Outside flash
 		return RSP_ERR;
 	}
